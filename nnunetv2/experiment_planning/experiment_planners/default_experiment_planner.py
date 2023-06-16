@@ -54,13 +54,13 @@ class ExperimentPlanner(object):
         self.UNet_reference_val_corresp_GB = 8
         self.UNet_reference_val_corresp_bs_2d = 12
         self.UNet_reference_val_corresp_bs_3d = 2
-        self.UNet_vram_target_GB = gpu_memory_target_in_gb
-        self.UNet_featuremap_min_edge_length = 4
-        self.UNet_blocks_per_stage_encoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
+        self.UNet_vram_target_GB = gpu_memory_target_in_gb  # gpu显存设置太小的话，性能会受到影响吧？
+        self.UNet_featuremap_min_edge_length = 4  # 特征图的最小边长，不能这么粗暴地设置为4吧？
+        self.UNet_blocks_per_stage_encoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)  # 设置每一层的block个数
         self.UNet_blocks_per_stage_decoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
-        self.UNet_min_batch_size = 2
-        self.UNet_max_features_2d = 512
-        self.UNet_max_features_3d = 320
+        self.UNet_min_batch_size = 2  # 最小的batch size
+        self.UNet_max_features_2d = 512  # 2d图像的最大特征维度
+        self.UNet_max_features_3d = 320  # 3d图像的最大特征维度
 
         self.lowres_creation_threshold = 0.25  # if the patch size of fullres is less than 25% of the voxels in the
         # median shape then we need a lowres config as well
@@ -98,8 +98,8 @@ class ExperimentPlanner(object):
         Works for PlainConvUNet, ResidualEncoderUNet
         """
         dim = len(patch_size)
-        conv_op = convert_dim_to_conv_op(dim)
-        norm_op = get_matching_instancenorm(conv_op)
+        conv_op = convert_dim_to_conv_op(dim)  # conv3d
+        norm_op = get_matching_instancenorm(conv_op)  # instance norm
         net = UNet_class(num_input_channels, n_stages,
                          features_per_stage,
                          conv_op,
@@ -183,7 +183,7 @@ class ExperimentPlanner(object):
         other_axes = [i for i in range(len(target)) if i != worst_spacing_axis]
         other_spacings = [target[i] for i in other_axes]
         other_sizes = [target_size[i] for i in other_axes]
-
+        # 如果某个轴的体素间距或者大小与其他轴的差距太大，就设置为true
         has_aniso_spacing = target[worst_spacing_axis] > (self.anisotropy_threshold * max(other_spacings))
         has_aniso_voxels = target_size[worst_spacing_axis] * self.anisotropy_threshold < min(other_sizes)
 
@@ -236,7 +236,7 @@ class ExperimentPlanner(object):
         # find an initial patch size
         # we first use the spacing to get an aspect ratio
         tmp = 1 / np.array(spacing)
-
+        # 这里的patch size初始设置就是 （255，255，255）
         # we then upscale it so that it initially is certainly larger than what we need (rescale to have the same
         # volume as a patch of size 256 ** 3)
         # this may need to be adapted when using absurdly large GPU memory targets. Increasing this now would not be
@@ -253,7 +253,7 @@ class ExperimentPlanner(object):
         # this is different from how nnU-Net v1 does it!
         # todo patch size can still get too large because we pad the patch size to a multiple of 2**n
         initial_patch_size = np.array([min(i, j) for i, j in zip(initial_patch_size, median_shape[:len(spacing)])])
-
+        # 循环测试得到网络拓扑结构
         # use that to get the network topology. Note that this changes the patch_size depending on the number of
         # pooling operations (must be divisible by 2**num_pool in each axis)
         network_num_pool_per_axis, pool_op_kernel_sizes, conv_kernel_sizes, patch_size, \
@@ -261,7 +261,7 @@ class ExperimentPlanner(object):
                                                              self.UNet_featuremap_min_edge_length,
                                                              999999)
 
-        # now estimate vram consumption
+        # now estimate vram consumption 估计虚拟内存消耗
         num_stages = len(pool_op_kernel_sizes)
         estimate = self.static_estimate_VRAM_usage(tuple(patch_size),
                                                    num_stages,
@@ -379,7 +379,7 @@ class ExperimentPlanner(object):
         So for now if you want a different transpose_forward/backward you need to create a new planner. Also not too
         hard.
         """
-
+        # 这里是按照轴的分辨率进行重新排序，也不知道这样做是为了什么
         # first get transpose
         transpose_forward, transpose_backward = self.determine_transpose()
 

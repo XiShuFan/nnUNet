@@ -8,3 +8,7 @@ ANISO_THRESHOLD = 3  # determines when a sample is considered anisotropic (3 mea
 # resolution axis must be 3x as large as the next largest spacing)
 
 default_n_proc_DA = get_allowed_n_proc_DA()
+
+os.environ['nnUNet_raw'] = 'D:\\xsf\\Dataset\\nnUNet_raw'
+os.environ['nnUNet_preprocessed'] ='D:\\xsf\\Dataset\\nnUNet_preprocessed'
+os.environ['nnUNet_results'] ='D:\\xsf\\Dataset\\nnUNet_results'

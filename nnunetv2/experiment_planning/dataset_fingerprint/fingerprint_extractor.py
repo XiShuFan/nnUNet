@@ -15,7 +15,7 @@ from nnunetv2.utilities.utils import get_identifiers_from_splitted_dataset_folde
     create_lists_from_splitted_dataset_folder
 from tqdm import tqdm
 
-
+# 只提供了一个fingerprint extractor，其他的extractor需要继承这个实现
 class DatasetFingerprintExtractor(object):
     def __init__(self, dataset_name_or_id: Union[str, int], num_processes: int = 8, verbose: bool = False):
         """
@@ -32,7 +32,7 @@ class DatasetFingerprintExtractor(object):
         self.input_folder = join(nnUNet_raw, dataset_name)
         self.num_processes = num_processes
         self.dataset_json = load_json(join(self.input_folder, 'dataset.json'))
-
+        # 体素强度值统计只选取10e7个体素
         # We don't want to use all foreground voxels because that can accumulate a lot of data (out of memory). It is
         # also not critically important to get all pixels as long as there are enough. Let's use 10e7 voxels in total
         # (for the entire dataset)
@@ -85,7 +85,7 @@ class DatasetFingerprintExtractor(object):
         rw = reader_writer_class()
         images, properties_images = rw.read_images(image_files)
         segmentation, properties_seg = rw.read_seg(segmentation_file)
-
+        # 现在不会再保存crop后的结果，而是实时做，这样可以减少空间消耗
         # we no longer crop and save the cropped images before this is run. Instead we run the cropping on the fly.
         # Downside is that we need to do this twice (once here and once during preprocessing). Upside is that we don't
         # need to save the cropped data anymore. Given that cropping is not too expensive it makes sense to do it this

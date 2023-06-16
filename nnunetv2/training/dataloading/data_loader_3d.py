@@ -23,7 +23,7 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
             shape = data.shape[1:]
             dim = len(shape)
             bbox_lbs, bbox_ubs = self.get_bbox(shape, force_fg, properties['class_locations'])
-
+            # [XSF] 就是在这里确定了裁剪的区域！那么这里的位置信息可以加到网络中学习吗？
             # whoever wrote this knew what he was doing (hint: it was me). We first crop the data to the region of the
             # bbox that actually lies within the data. This will result in a smaller array which is then faster to pad.
             # valid_bbox is just the coord that lied within the data cube. It will be padded to match the patch size
@@ -37,10 +37,10 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
             # remove label -1 in the data augmentation but this way it is less error prone)
             this_slice = tuple([slice(0, data.shape[0])] + [slice(i, j) for i, j in zip(valid_bbox_lbs, valid_bbox_ubs)])
             data = data[this_slice]
-
+            # 这里确定了保留原图的哪部分
             this_slice = tuple([slice(0, seg.shape[0])] + [slice(i, j) for i, j in zip(valid_bbox_lbs, valid_bbox_ubs)])
             seg = seg[this_slice]
-
+            # 在这里确定了pad的大小
             padding = [(-min(0, bbox_lbs[i]), max(bbox_ubs[i] - shape[i], 0)) for i in range(dim)]
             data_all[j] = np.pad(data, ((0, 0), *padding), 'constant', constant_values=0)
             seg_all[j] = np.pad(seg, ((0, 0), *padding), 'constant', constant_values=-1)

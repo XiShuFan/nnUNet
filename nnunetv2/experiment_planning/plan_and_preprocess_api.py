@@ -24,7 +24,7 @@ def extract_fingerprint_dataset(dataset_id: int,
     """
     dataset_name = convert_id_to_dataset_name(dataset_id)
     print(dataset_name)
-
+    # 最好检查数据一致性，这一步可以保证标签没问题、image和label图像的属性没问题
     if check_dataset_integrity:
         verify_dataset_integrity(join(nnUNet_raw, dataset_name), num_processes)
 

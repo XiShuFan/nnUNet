@@ -188,7 +188,7 @@ def verify_dataset_integrity(folder: str, num_processes: int = 8) -> None:
             zip([join(folder, 'labelsTr', i) for i in labelfiles], [reader_writer_class] * len(labelfiles),
                 [expected_labels] * len(labelfiles))
         )
-        if not all(result):
+        if not all(result):  # 检查图像中标签没有多也没有少
             raise RuntimeError(
                 'Some segmentation images contained unexpected labels. Please check text output above to see which one(s).')
 
@@ -198,7 +198,7 @@ def verify_dataset_integrity(folder: str, num_processes: int = 8) -> None:
             zip([folder] * expected_num_training, training_identifiers, [num_modalities] * expected_num_training,
                 [reader_writer_class] * expected_num_training, [file_ending] * expected_num_training)
         )
-        if not all(result):
+        if not all(result):  # 检查图像和标签的朝向、分辨率、起始位置是否相同
             raise RuntimeError(
                 'Some images have errors. Please check text output above to see which one(s) and what\'s going on.')
 

@@ -50,7 +50,7 @@ def get_pool_and_conv_props(spacing, patch_size, min_feature_map_size, max_numpo
     kernel_size = [1] * dim
 
     while True:
-        # exclude axes that we cannot pool further because of min_feature_map_size constraint
+        # exclude axes that we cannot pool further because of min_feature_map_size constraint 这里的策略是能下采样就尽量下采样
         valid_axes_for_pool = [i for i in range(dim) if current_size[i] >= 2*min_feature_map_size]
         if len(valid_axes_for_pool) < 1:
             break
@@ -79,7 +79,7 @@ def get_pool_and_conv_props(spacing, patch_size, min_feature_map_size, max_numpo
             if kernel_size[d] == 3:
                 continue
             else:
-                if spacings_of_axes[d] / min(current_spacing) < 2:
+                if spacings_of_axes[d] / min(current_spacing) < 2:  # 如果当前轴的分辨率不是很小，尽可能下采样
                     kernel_size[d] = 3
 
         other_axes = [i for i in range(dim) if i not in valid_axes_for_pool]

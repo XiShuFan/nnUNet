@@ -2,6 +2,12 @@ import os
 import socket
 from typing import Union, Optional
 
+os.environ['nnUNet_raw'] = 'D:\\xsf\\Dataset\\nnUNet_raw'
+os.environ['nnUNet_preprocessed'] = 'D:\\xsf\\Dataset\\nnUNet_preprocessed'
+os.environ['nnUNet_results'] = 'D:\\xsf\\Dataset\\nnUNet_results'
+# pytorch 2.0 提出了更快的训练方法，但是windows不支持啊
+# os.environ['nnUNet_compile'] = 'true'
+
 import nnunetv2
 import torch.cuda
 import torch.distributed as dist
@@ -100,7 +106,9 @@ def maybe_load_checkpoint(nnunet_trainer: nnUNetTrainer, continue_training: bool
 
 def setup_ddp(rank, world_size):
     # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    # windows下使用 gloo
+    # linux下使用nccl
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
 
 def cleanup_ddp():
@@ -201,35 +209,62 @@ def run_training(dataset_name_or_id: Union[str, int],
 def run_training_entry():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('dataset_name_or_id', type=str,
+
+    print('You can specify configuration and fold')
+
+    parser.add_argument('-dataset_name_or_id', type=str, default='1000',
                         help="Dataset name or ID to train with")
-    parser.add_argument('configuration', type=str,
+
+    # 不指定配置的话，默认会使用所有配置训练一遍，然后模型来判断最优配置
+    parser.add_argument('-configuration', type=str, default='3d_fullres',
                         help="Configuration that should be trained")
-    parser.add_argument('fold', type=str,
+
+    # nnU-Net默认5则交叉验证，这样可以知道哪个模型是最优的，并且通过投票法决定预测结果
+    # 可以设置成 'all'
+    parser.add_argument('-fold', type=str, default='1',
                         help='Fold of the 5-fold cross-validation. Should be an int between 0 and 4.')
+
+    # 默认使用nnU-Net trainer
     parser.add_argument('-tr', type=str, required=False, default='nnUNetTrainer',
                         help='[OPTIONAL] Use this flag to specify a custom trainer. Default: nnUNetTrainer')
+
+    # 默认使用nnUNet plans
     parser.add_argument('-p', type=str, required=False, default='nnUNetPlans',
                         help='[OPTIONAL] Use this flag to specify a custom plans identifier. Default: nnUNetPlans')
+
     parser.add_argument('-pretrained_weights', type=str, required=False, default=None,
                         help='[OPTIONAL] path to nnU-Net checkpoint file to be used as pretrained model. Will only '
                              'be used when actually training. Beta. Use with caution.')
+
+    # gpu个数
     parser.add_argument('-num_gpus', type=int, default=1, required=False,
                         help='Specify the number of GPUs to use for training')
+
+    # 不解压训练npz文件，这样会消耗更多的CPU资源
     parser.add_argument("--use_compressed", default=False, action="store_true", required=False,
                         help="[OPTIONAL] If you set this flag the training cases will not be decompressed. Reading compressed "
                              "data is much more CPU and (potentially) RAM intensive and should only be used if you "
                              "know what you are doing")
+
+    # 为了找到集成学习的最优配置，需要保存npz
     parser.add_argument('--npz', action='store_true', required=False,
                         help='[OPTIONAL] Save softmax predictions from final validation as npz files (in addition to predicted '
                              'segmentations). Needed for finding the best ensemble.')
+
+    # 继续训练
     parser.add_argument('--c', action='store_true', required=False,
                         help='[OPTIONAL] Continue training from latest checkpoint')
+
+    # 只运行validation
     parser.add_argument('--val', action='store_true', required=False,
                         help='[OPTIONAL] Set this flag to only run the validation. Requires training to have finished.')
+
+    # 不保存checkpoint
     parser.add_argument('--disable_checkpointing', action='store_true', required=False,
                         help='[OPTIONAL] Set this flag to disable checkpointing. Ideal for testing things out and '
                              'you dont want to flood your hard drive with checkpoints.')
+
+    # 默认使用cuda设备
     parser.add_argument('-device', type=str, default='cuda', required=False,
                     help="Use this to set the device the training should run with. Available options are 'cuda' "
                          "(GPU), 'cpu' (CPU) and 'mps' (Apple M1/M2). Do NOT use this to set which GPU ID! "
@@ -250,10 +285,15 @@ def run_training_entry():
     else:
         device = torch.device('mps')
 
+    # 保存预测热力图，方便后面ensemble learning
+    args.npz = True
+
     run_training(args.dataset_name_or_id, args.configuration, args.fold, args.tr, args.p, args.pretrained_weights,
                  args.num_gpus, args.use_compressed, args.npz, args.c, args.val, args.disable_checkpointing,
                  device=device)
 
 
 if __name__ == '__main__':
+    # 环境变量设置在最上方
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
     run_training_entry()

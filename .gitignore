@@ -112,4 +112,5 @@ ENV/
 *.jpeg
 
 *.model
+nnunetv2.egg-info
 

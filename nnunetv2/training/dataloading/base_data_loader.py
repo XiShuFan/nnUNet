@@ -78,7 +78,7 @@ class nnUNetDataLoaderBase(DataLoader):
         # define what the upper and lower bound can be to then sample form them with np.random.randint
         lbs = [- need_to_pad[i] // 2 for i in range(dim)]
         ubs = [data_shape[i] + need_to_pad[i] // 2 + need_to_pad[i] % 2 - self.patch_size[i] for i in range(dim)]
-
+        # [XSF] 如果没有强制要求patch包含前景区域，就会随机裁剪
         # if not force_fg then we can just sample the bbox randomly from lb and ub. Else we need to make sure we get
         # at least one of the foreground classes in the patch
         if not force_fg and not self.has_ignore:

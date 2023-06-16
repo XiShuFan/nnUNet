@@ -51,7 +51,7 @@ class ZScoreNormalization(ImageNormalization):
 
 class CTNormalization(ImageNormalization):
     leaves_pixels_outside_mask_at_zero_if_use_mask_for_norm_is_true = False
-
+    # 简单的归一化
     def run(self, image: np.ndarray, seg: np.ndarray = None) -> np.ndarray:
         assert self.intensityproperties is not None, "CTNormalization requires intensity properties"
         image = image.astype(self.target_dtype)
