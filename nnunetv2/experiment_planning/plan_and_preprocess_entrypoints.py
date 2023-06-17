@@ -5,7 +5,7 @@ from nnunetv2.experiment_planning.plan_and_preprocess_api import extract_fingerp
 def extract_fingerprint_entry():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('-d', nargs='+', type=int, default=[1000],
+    parser.add_argument('-d', nargs='+', type=int, default=[1001],
                         help="[REQUIRED] List of dataset IDs. Example: 2 4 5. This will run fingerprint extraction, experiment "
                              "planning and preprocessing for these datasets. Can of course also be just one dataset")
     parser.add_argument('-fpe', type=str, required=False, default='DatasetFingerprintExtractor',
@@ -36,7 +36,7 @@ def plan_experiment_entry():
     import argparse
     parser = argparse.ArgumentParser()
     # 任务编号
-    parser.add_argument('-d', nargs='+', type=int, default=[1000],
+    parser.add_argument('-d', nargs='+', type=int, default=[1001],
                         help="[REQUIRED] List of dataset IDs. Example: 2 4 5. This will run fingerprint extraction, experiment "
                              "planning and preprocessing for these datasets. Can of course also be just one dataset")
     # 设计实验默认使用 ExperimentPlanner
@@ -46,7 +46,7 @@ def plan_experiment_entry():
                              'It\'s an all in one solution now. Wuch. Such amazing.')
 
     # 设置gpu显存大小
-    parser.add_argument('-gpu_memory_target', default=24, type=float, required=False,
+    parser.add_argument('-gpu_memory_target', default=22, type=float, required=False,
                         help='[OPTIONAL] DANGER ZONE! Sets a custom GPU memory target. Default: 8 [GB]. Changing this will '
                              'affect patch and batch size and will '
                              'definitely affect your models performance! Only use this if you really know what you '
@@ -77,21 +77,27 @@ def plan_experiment_entry():
                              'differently named plans file such that the nnunet default plans are not '
                              'overwritten. You will then need to specify your custom plans file with -p whenever '
                              'running other nnunet commands (training, inference etc)')
+
+    # 设置最小的batch size，添加这个参数主要是实现STS-3D任务
+    parser.add_argument('-min_batch_size', default=4, required=False, help='min_batch_size of training')
+
     args, unrecognized_args = parser.parse_known_args()
     plan_experiments(args.d, args.pl, args.gpu_memory_target, args.preprocessor_name, args.overwrite_target_spacing,
-                     args.overwrite_plans_name)
+                     args.overwrite_plans_name, min_batch_size=args.min_batch_size)
 
 
 def preprocess_entry():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('-d', nargs='+', type=int, default=[1000],
+    parser.add_argument('-d', nargs='+', type=int, default=[1001],
                         help="[REQUIRED] List of dataset IDs. Example: 2 4 5. This will run fingerprint extraction, experiment "
                              "planning and preprocessing for these datasets. Can of course also be just one dataset")
 
     # 计划的名字，可以自己改
     parser.add_argument('-plans_name', default='nnUNetPlans', required=False,
                         help='[OPTIONAL] You can use this to specify a custom plans file that you may have generated')
+
+    # 所有配置
     parser.add_argument('-c', required=False, default=['2d', '3d_fullres', '3d_lowres'], nargs='+',
                         help='[OPTIONAL] Configurations for which the preprocessing should be run. Default: 2d 3f_fullres '
                              '3d_lowres. 3d_cascade_fullres does not need to be specified because it uses the data '

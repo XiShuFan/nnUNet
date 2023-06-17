@@ -24,7 +24,8 @@ class ExperimentPlanner(object):
                  gpu_memory_target_in_gb: float = 8,
                  preprocessor_name: str = 'DefaultPreprocessor', plans_name: str = 'nnUNetPlans',
                  overwrite_target_spacing: Union[List[float], Tuple[float, ...]] = None,
-                 suppress_transpose: bool = False):
+                 suppress_transpose: bool = False,
+                 min_batch_size=2):
         """
         overwrite_target_spacing only affects 3d_fullres! (but by extension 3d_lowres which starts with fullres may
         also be affected
@@ -58,7 +59,7 @@ class ExperimentPlanner(object):
         self.UNet_featuremap_min_edge_length = 4  # 特征图的最小边长，不能这么粗暴地设置为4吧？
         self.UNet_blocks_per_stage_encoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)  # 设置每一层的block个数
         self.UNet_blocks_per_stage_decoder = (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)
-        self.UNet_min_batch_size = 2  # 最小的batch size
+        self.UNet_min_batch_size = min_batch_size  # 最小的batch size
         self.UNet_max_features_2d = 512  # 2d图像的最大特征维度
         self.UNet_max_features_3d = 320  # 3d图像的最大特征维度
 
@@ -168,11 +169,11 @@ class ExperimentPlanner(object):
 
         spacings = self.dataset_fingerprint['spacings']
         sizes = self.dataset_fingerprint['shapes_after_crop']
-
+        # spacing取中位数
         target = np.percentile(np.vstack(spacings), 50, 0)
 
         # todo sizes_after_resampling = [compute_new_shape(j, i, target) for i, j in zip(spacings, sizes)]
-
+        # target size也设置成中位数
         target_size = np.percentile(np.vstack(sizes), 50, 0)
         # we need to identify datasets for which a different target spacing could be beneficial. These datasets have
         # the following properties:
@@ -386,7 +387,7 @@ class ExperimentPlanner(object):
         # get fullres spacing and transpose it
         fullres_spacing = self.determine_fullres_target_spacing()
         fullres_spacing_transposed = fullres_spacing[transpose_forward]
-
+        # 对 crop之后的数据进行重采样，但是这里并不知道原始图像大小
         # get transposed new median shape (what we would have after resampling)
         new_shapes = [compute_new_shape(j, i, fullres_spacing) for i, j in
                       zip(self.dataset_fingerprint['spacings'], self.dataset_fingerprint['shapes_after_crop'])]

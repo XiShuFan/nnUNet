@@ -135,7 +135,7 @@ class nnUNetTrainer(object):
                  self.__class__.__name__ + '__' + self.plans_manager.plans_name + "__" +
                  self.configuration_manager.previous_stage_name, 'predicted_next_stage', self.configuration_name) \
                 if self.is_cascaded else None
-
+        # [XSF]网络超参数设置
         ### Some hyperparameters for you to fiddle with
         self.initial_lr = 1e-2
         self.weight_decay = 3e-5

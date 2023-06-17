@@ -25,3 +25,4 @@ experiment_planning:
   - 解压数据成npy文件
   - 得到dataloader。取数据在nondet_multi_threaded_augmenter中的producer函数；data_loader_3d文件中的generat_train_batch函数；get_bbox确定剪裁区域（==随机裁剪==）
   - 随机裁剪完成之后还通过transform进行了中心裁剪得到最终的统一patch，这样的话得考虑怎么把裁剪区域的范围给提取出来呢？
+  - 训练过程是设置最大的epoch数量，然后每个epoch设置的是最大的iteration数量，所以dataloader是infinite的，不需要我们自己设置了，强啊
