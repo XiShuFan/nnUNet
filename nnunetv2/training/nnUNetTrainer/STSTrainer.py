@@ -62,14 +62,158 @@ from torch import distributed as dist
 from torch.cuda import device_count
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.nn.functional as F
 from .nnUNetTrainer import nnUNetTrainer
 
 
 class STSTrainer(nnUNetTrainer):
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict, unpack_dataset: bool = True,
-                 device: torch.device = torch.device('cuda')):
+                 device: torch.device = torch.device('cuda'), pre_train: bool = True):
         # 直接继承父类，不需要修改
         super(STSTrainer, self).__init__(plans, configuration, fold, dataset_json, unpack_dataset, device)
+        # 这里判断是否是预训练
+        self.pre_train = pre_train
+
+    def initialize(self):
+        """
+        这个函数要初始化模型。如果是pre_train，直接初始化一个老师模型；否则要同时初始化老师模型和学生模型
+        """
+
+        if not self.was_initialized:
+            self.num_input_channels = determine_num_input_channels(self.plans_manager, self.configuration_manager,
+                                                                   self.dataset_json)
+            # 预训练，只需要构造一个老师模型
+            if self.pre_train:
+                # 在初始化中构造网络模型
+                self.network = self.build_network_architecture(self.plans_manager, self.dataset_json,
+                                                               self.configuration_manager,
+                                                               self.num_input_channels,
+                                                               enable_deep_supervision=True).to(self.device)
+                # compile network for free speedup 编译模型加速
+                if ('nnUNet_compile' in os.environ.keys()) and (
+                        os.environ['nnUNet_compile'].lower() in ('true', '1', 't')):
+                    self.print_to_log_file('Compiling network...')
+                    self.network = torch.compile(self.network)
+
+                self.optimizer, self.lr_scheduler = self.configure_optimizers()
+                # if ddp, wrap in DDP wrapper
+                if self.is_ddp:
+                    self.network = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.network)
+                    self.network = DDP(self.network, device_ids=[self.local_rank])
+
+                self.loss = self._build_loss()
+                self.was_initialized = True
+            # 半监督训练，需要构造老师模型和学生模型
+            else:
+                # 老师模型，构造完之后加载参数，并且固定参数不进行反向传播
+                self.teacher = self.build_network_architecture(self.plans_manager, self.dataset_json,
+                                                               self.configuration_manager,
+                                                               self.num_input_channels,
+                                                               enable_deep_supervision=True).to(self.device)
+                # compile network for free speedup 编译模型加速
+                if ('nnUNet_compile' in os.environ.keys()) and (
+                        os.environ['nnUNet_compile'].lower() in ('true', '1', 't')):
+                    self.print_to_log_file('Compiling network...')
+                    self.teacher = torch.compile(self.teacher)
+
+                # if ddp, wrap in DDP wrapper
+                if self.is_ddp:
+                    self.teacher = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.teacher)
+                    self.teacher = DDP(self.teacher, device_ids=[self.local_rank])
+
+
+                # 学生模型，构造完之后加载参数，进行正常反向传播
+                self.student = self.build_network_architecture(self.plans_manager, self.dataset_json,
+                                                               self.configuration_manager,
+                                                               self.num_input_channels,
+                                                               enable_deep_supervision=True).to(self.device)
+                # compile network for free speedup 编译模型加速
+                if ('nnUNet_compile' in os.environ.keys()) and (
+                        os.environ['nnUNet_compile'].lower() in ('true', '1', 't')):
+                    self.print_to_log_file('Compiling network...')
+                    self.student = torch.compile(self.student)
+
+                # if ddp, wrap in DDP wrapper
+                if self.is_ddp:
+                    self.student = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.student)
+                    self.student = DDP(self.student, device_ids=[self.local_rank])
+
+                # 给学生模型用的，我认为这里是两阶段训练，所以不加载pre train记录的optimizer参数和lr_scheduler参数
+                self.optimizer, self.lr_scheduler = self.configure_optimizers()
+                self.loss = self._build_loss()
+                self.was_initialized = True
+
+                # 加载参数
+                filename_or_checkpoint = join(self.output_folder, "checkpoint_best_pre_train.pth")
+                if not isfile(filename_or_checkpoint):
+                    raise RuntimeError(f'checkpoint {filename_or_checkpoint} is not a file!')
+                # 加载预训练模型并且固定老师模型参数
+                self.load_checkpoint_ssl(filename_or_checkpoint)
+
+        else:
+            raise RuntimeError("You have called self.initialize even though the trainer was already initialized. "
+                               "That should not happen.")
+
+
+    def load_checkpoint_ssl(self, filename_or_checkpoint: str) -> None:
+        """
+        为ssl的老师和学生模型加载参数，并且固定老师模型
+        """
+        if not self.was_initialized:
+            self.initialize()
+
+        if isinstance(filename_or_checkpoint, str):
+            checkpoint = torch.load(filename_or_checkpoint, map_location=self.device)
+        # if state dict comes from nn.DataParallel but we use non-parallel model here then the state dict keys do not
+        # match. Use heuristic to make it match
+        new_state_dict = {}
+        for k, value in checkpoint['network_weights'].items():
+            key = k
+            if key not in self.teacher.state_dict().keys() and key.startswith('module.'):
+                key = key[7:]
+            new_state_dict[key] = value
+
+        # messing with state dict naming schemes. Facepalm.
+        if self.is_ddp:
+            if isinstance(self.teacher.module, OptimizedModule):
+                self.teacher.module._orig_mod.load_state_dict(new_state_dict)
+            else:
+                self.teacher.module.load_state_dict(new_state_dict)
+            if isinstance(self.student.module, OptimizedModule):
+                self.student.module._orig_mod.load_state_dict(new_state_dict)
+            else:
+                self.student.module.load_state_dict(new_state_dict)
+        else:
+            if isinstance(self.teacher, OptimizedModule):
+                self.teacher._orig_mod.load_state_dict(new_state_dict)
+            else:
+                self.teacher.load_state_dict(new_state_dict)
+            if isinstance(self.student, OptimizedModule):
+                self.student._orig_mod.load_state_dict(new_state_dict)
+            else:
+                self.student.load_state_dict(new_state_dict)
+
+        # 固定住老师模型的参数
+        if self.is_ddp:
+            if isinstance(self.teacher.module, OptimizedModule):
+                for param in self.teacher.module._orig_mod:
+                    param.detach_()
+            else:
+                for param in self.teacher.module:
+                    param.detach_()
+        else:
+            if isinstance(self.teacher, OptimizedModule):
+                for param in self.teacher._orig_mod:
+                    param.detach_()
+            else:
+                for param in self.teacher:
+                    param.detach_()
+
+        # 下面的参数看情况加载吧，我认为这是开启了一个全新的训练，所以不需要加载
+        # self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+        # if self.grad_scaler is not None:
+        #     if checkpoint['grad_scaler_state'] is not None:
+        #         self.grad_scaler.load_state_dict(checkpoint['grad_scaler_state'])
 
     def do_split(self):
         """
@@ -259,33 +403,32 @@ class STSTrainer(nnUNetTrainer):
         # print(f"oversample: {self.oversample_foreground_percent}")
 
     def on_train_end(self):
-        self.save_checkpoint(join(self.output_folder, "checkpoint_final.pth"))
+        # 区分预训练和半监督训练
+        if self.pre_train:
+            self.save_checkpoint(join(self.output_folder, "checkpoint_final_pre_train.pth"))
+        else:
+            self.save_checkpoint(join(self.output_folder, "checkpoint_final_self_train.pth"))
         # now we can delete latest
-        if self.local_rank == 0 and isfile(join(self.output_folder, "checkpoint_latest.pth")):
-            os.remove(join(self.output_folder, "checkpoint_latest.pth"))
+        if self.local_rank == 0:
+            if self.pre_train and isfile(join(self.output_folder, "checkpoint_latest_pre_train.pth")):
+                os.remove(join(self.output_folder, "checkpoint_latest_pre_train.pth"))
+            if (not self.pre_train) and isfile(join(self.output_folder, "checkpoint_latest_self_train.pth")):
+                os.remove(join(self.output_folder, "checkpoint_latest_self_train.pth"))
 
         # shut down dataloaders
         old_stdout = sys.stdout
         with open(os.devnull, 'w') as f:
             sys.stdout = f
-            if self.dataloader_train is not None:
-                self.dataloader_train._finish()
+            if self.dataloader_train_labelled is not None:
+                self.dataloader_train_labelled._finish()
+            if self.dataloader_train_unlabelled is not None:
+                self.dataloader_train_unlabelled._finish()
             if self.dataloader_val is not None:
                 self.dataloader_val._finish()
             sys.stdout = old_stdout
 
         empty_cache(self.device)
         self.print_to_log_file("Training done.")
-
-    def on_train_epoch_start(self):
-        self.network.train()
-        self.lr_scheduler.step(self.current_epoch)
-        self.print_to_log_file('')
-        self.print_to_log_file(f'Epoch {self.current_epoch}')
-        self.print_to_log_file(
-            f"Current learning rate: {np.round(self.optimizer.param_groups[0]['lr'], decimals=5)}")
-        # lrs are the same for all workers so we don't need to gather them in case of DDP training
-        self.logger.log('lrs', self.optimizer.param_groups[0]['lr'], self.current_epoch)
 
     def train_step(self, labelled_batch: dict, unlabelled_batch: dict) -> dict:
         # 有标签训练数据，确保数据没问题
@@ -317,11 +460,15 @@ class STSTrainer(nnUNetTrainer):
         # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
         # So autocast will only be active if we have a cuda device.
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-            # 这里属于pre_train的话，就只能使用有标签数据训练，小批量也没关系，不要过拟合了
             # 有标签数据分成两部分
             labelled_size = labelled_data.shape[0]
             assert labelled_size >= 2 and labelled_size % 2 == 0
-            labelled_data_a, labelled_data_b = labelled_data[:labelled_size//2], labelled_data[labelled_size//2:]
+            labelled_data_a, labelled_data_b = labelled_data[:labelled_size // 2], labelled_data[labelled_size // 2:]
+
+            # 无标签数据分成两部分
+            unlabelled_size = unlabelled_data.shape[0]
+            assert unlabelled_size >= 2 and unlabelled_size % 2 == 0
+            unlabelled_data_c, unlabelled_data_d = unlabelled_data[:unlabelled_size // 2], unlabelled_data[unlabelled_size // 2:]
 
             # 这里使用deep supervision，需要提取出来
             labelled_target_a = [labelled_a_b[:labelled_size // 2] for labelled_a_b in labelled_target]
@@ -330,16 +477,50 @@ class STSTrainer(nnUNetTrainer):
             # 随机选取裁剪的区域mask，因为使用了deep supervision，所以需要获得多个mask
             img_masks, loss_masks = self.generate_crop_mask(labelled_target_a)
 
-            # 把a图像裁剪到b图像上
-            crop_a_to_b_data = labelled_data_a * img_masks[0] + labelled_data_b * (1 - img_masks[0])
-            crop_a_to_b_target = [target_a * loss_mask + target_b * (1 - loss_mask)
-                                  for target_a, target_b, loss_mask in zip(labelled_target_a, labelled_target_b, loss_masks)]
+            # 这里属于pre_train的话，就只能使用有标签数据训练，小批量也没关系，不要过拟合了
+            if self.pre_train:
+                # 把a图像裁剪到b图像上
+                crop_a_to_b_data = labelled_data_a * img_masks[0] + labelled_data_b * (1 - img_masks[0])
+                crop_a_to_b_target = [target_a * loss_mask + target_b * (1 - loss_mask)
+                                      for target_a, target_b, loss_mask in zip(labelled_target_a, labelled_target_b, loss_masks)]
 
-            # 训练
-            output = self.network(crop_a_to_b_data)
+                # 训练
+                output = self.network(crop_a_to_b_data)
 
-            # del data
-            l = self.loss(output, crop_a_to_b_target)
+                # del data
+                l = self.loss(output, crop_a_to_b_target)
+
+            # 这里属于半监督训练
+            else:
+                # 老师模型不进行训练，所以要注意用no grad
+                with torch.no_grad():
+                    pre_c = self.teacher(unlabelled_data_c)
+                    pre_d = self.teacher(unlabelled_data_d)
+                    # 做softmax得到伪标签
+                    _, pre_c = torch.max(F.softmax(pre_c, dim=1), dim=1)
+                    _, pre_d = torch.max(F.softmax(pre_d, dim=1), dim=1)
+                    # TODO: 这里我没有做连通分量检测，不知道有没有问题
+
+                # 老师模型的任务完成了，给无标签数据打上了伪标签
+                # 现在把有标签数据和无标签数据裁剪到一起，给学生模型训练
+
+                # 无标签数据裁剪到有标签数据
+                crop_c_to_a = unlabelled_data_c * img_masks[0] + labelled_data_a * (1 - img_masks[0])
+                crop_c_to_a_target = [target_c * loss_mask + target_a * (1 - loss_mask)
+                                      for target_c, target_a, loss_mask in zip(pre_c, labelled_target_a, loss_masks)]
+                # 有标签数据裁剪到无标签数据
+                crop_b_to_d = labelled_data_b * img_masks[0] + unalbelled_data_d * (1 - img_masks[0])
+                crop_b_to_d_target = [target_b * loss_mask + target_d * (1 - loss_mask)
+                                      for target_b, target_d, loss_mask in zip(labelled_target_b, pre_d, loss_masks)]
+                # 得到输出结果
+                c_to_a_output = self.student(crop_c_to_a)
+                b_to_d_output = self.student(crop_b_to_d)
+
+                # 计算loss
+                l1 = self.loss(c_to_a_output, crop_c_to_a_target)
+                l2 = self.loss(b_to_d_output, crop_b_to_d_target)
+
+                l = (l1 + l2) / 2
 
         if self.grad_scaler is not None:
             self.grad_scaler.scale(l).backward()
@@ -351,6 +532,42 @@ class STSTrainer(nnUNetTrainer):
             l.backward()
             torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
             self.optimizer.step()
+
+        # 半监督训练中，每个iter，老师模型也更新
+        if not self.pre_train:
+            # 更新比例
+            alpha = 0.99
+            if self.is_ddp:
+                if isinstance(self.teacher.module, OptimizedModule):
+                    teacher_state_dict = self.teacher.module._orig_mod.state_dict()
+                    student_state_dict = self.student.module._orig_mod.state_dict()
+                    new_dict = {}
+                    for key in student_state_dict:
+                        new_dict[key] = alpha * teacher_state_dict[key] + (1 - alpha) * student_state_dict[key]
+                    self.teacher.module._orig_mod.load_state_dict(new_dict)
+                else:
+                    teacher_state_dict = self.teacher.module.state_dict()
+                    student_state_dict = self.student.module.state_dict()
+                    new_dict = {}
+                    for key in student_state_dict:
+                        new_dict[key] = alpha * teacher_state_dict[key] + (1 - alpha) * student_state_dict[key]
+                    self.teacher.module.load_state_dict(new_dict)
+            else:
+                if isinstance(self.teacher, OptimizedModule):
+                    teacher_state_dict = self.teacher._orig_mod.state_dict()
+                    student_state_dict = self.student._orig_mod.state_dict()
+                    new_dict = {}
+                    for key in student_state_dict:
+                        new_dict[key] = alpha * teacher_state_dict[key] + (1 - alpha) * student_state_dict[key]
+                    self.teacher._orig_mod.load_state_dict(new_dict)
+                else:
+                    teacher_state_dict = self.teacher.state_dict()
+                    student_state_dict = self.student.state_dict()
+                    new_dict = {}
+                    for key in student_state_dict:
+                        new_dict[key] = alpha * teacher_state_dict[key] + (1 - alpha) * student_state_dict[key]
+                    self.teacher.load_state_dict(new_dict)
+
         return {'loss': l.detach().cpu().numpy()}
 
     # 对数据随机裁剪区域
@@ -374,20 +591,92 @@ class STSTrainer(nnUNetTrainer):
             loss_masks.append(loss_mask)
         return masks, loss_masks
 
-    def on_train_epoch_end(self, train_outputs: List[dict]):
-        outputs = collate_outputs(train_outputs)
+    def on_epoch_end(self):
+        self.logger.log('epoch_end_timestamps', time(), self.current_epoch)
 
-        if self.is_ddp:
-            losses_tr = [None for _ in range(dist.get_world_size())]
-            dist.all_gather_object(losses_tr, outputs['loss'])
-            loss_here = np.vstack(losses_tr).mean()
+        # todo find a solution for this stupid shit
+        self.print_to_log_file('train_loss', np.round(self.logger.my_fantastic_logging['train_losses'][-1], decimals=4))
+        self.print_to_log_file('val_loss', np.round(self.logger.my_fantastic_logging['val_losses'][-1], decimals=4))
+        self.print_to_log_file('Pseudo dice', [np.round(i, decimals=4) for i in
+                                               self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]])
+        self.print_to_log_file(
+            f"Epoch time: {np.round(self.logger.my_fantastic_logging['epoch_end_timestamps'][-1] - self.logger.my_fantastic_logging['epoch_start_timestamps'][-1], decimals=2)} s")
+
+        # handling periodic checkpointing
+        current_epoch = self.current_epoch
+        if (current_epoch + 1) % self.save_every == 0 and current_epoch != (self.num_epochs - 1):
+            # 区别预训练和半监督训练的结果
+            if self.pre_train:
+                self.save_checkpoint(join(self.output_folder, 'checkpoint_latest_pre_train.pth'))
+            else:
+                self.save_checkpoint(join(self.output_folder, 'checkpoint_latest_self_train.pth'))
+
+        # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
+        if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
+            self._best_ema = self.logger.my_fantastic_logging['ema_fg_dice'][-1]
+            self.print_to_log_file(f"Yayy! New best EMA pseudo Dice: {np.round(self._best_ema, decimals=4)}")
+            if self.pre_train:
+                self.save_checkpoint(join(self.output_folder, 'checkpoint_best_pre_train.pth'))
+            else:
+                self.save_checkpoint(join(self.output_folder, 'checkpoint_best_self_train.pth'))
+
+        if self.local_rank == 0:
+            self.logger.plot_progress_png(self.output_folder)
+
+        self.current_epoch += 1
+
+    def save_checkpoint(self, filename: str) -> None:
+        if self.local_rank == 0:
+            if not self.disable_checkpointing:
+                if self.is_ddp:
+                    if self.pre_train:
+                        mod = self.network.module
+                    else:
+                        mod = self.student.module
+                else:
+                    if self.pre_train:
+                        mod = self.network
+                    else:
+                        mod = self.student
+                if isinstance(mod, OptimizedModule):
+                    mod = mod._orig_mod
+
+                checkpoint = {
+                    'network_weights': mod.state_dict(),
+                    'optimizer_state': self.optimizer.state_dict(),
+                    'grad_scaler_state': self.grad_scaler.state_dict() if self.grad_scaler is not None else None,
+                    'logging': self.logger.get_checkpoint(),
+                    '_best_ema': self._best_ema,
+                    'current_epoch': self.current_epoch + 1,
+                    'init_args': self.my_init_kwargs,
+                    'trainer_name': self.__class__.__name__,
+                    'inference_allowed_mirroring_axes': self.inference_allowed_mirroring_axes,
+                }
+                torch.save(checkpoint, filename)
+            else:
+                self.print_to_log_file('No checkpoint written, checkpointing is disabled')
+
+    def on_train_epoch_start(self):
+        # 区分不同训练阶段
+        if self.pre_train:
+            self.network.train()
         else:
-            loss_here = np.mean(outputs['loss'])
-
-        self.logger.log('train_losses', loss_here, self.current_epoch)
+            self.teacher.train()
+            self.student.train()
+        self.lr_scheduler.step(self.current_epoch)
+        self.print_to_log_file('')
+        self.print_to_log_file(f'Epoch {self.current_epoch}')
+        self.print_to_log_file(
+            f"Current learning rate: {np.round(self.optimizer.param_groups[0]['lr'], decimals=5)}")
+        # lrs are the same for all workers so we don't need to gather them in case of DDP training
+        self.logger.log('lrs', self.optimizer.param_groups[0]['lr'], self.current_epoch)
 
     def on_validation_epoch_start(self):
-        self.network.eval()
+        if self.pre_train:
+            self.network.eval()
+        else:
+            self.student.eval()
+
 
     def validation_step(self, batch: dict) -> dict:
         data = batch['data']
@@ -404,7 +693,10 @@ class STSTrainer(nnUNetTrainer):
         # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
         # So autocast will only be active if we have a cuda device.
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
-            output = self.network(data)
+            if self.pre_train:
+                output = self.network(data)
+            else:
+                output = self.student(data)
             del data
             l = self.loss(output, target)
 
@@ -451,262 +743,6 @@ class STSTrainer(nnUNetTrainer):
             fn_hard = fn_hard[1:]
 
         return {'loss': l.detach().cpu().numpy(), 'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard}
-
-    def on_validation_epoch_end(self, val_outputs: List[dict]):
-        outputs_collated = collate_outputs(val_outputs)
-        tp = np.sum(outputs_collated['tp_hard'], 0)
-        fp = np.sum(outputs_collated['fp_hard'], 0)
-        fn = np.sum(outputs_collated['fn_hard'], 0)
-
-        if self.is_ddp:
-            world_size = dist.get_world_size()
-
-            tps = [None for _ in range(world_size)]
-            dist.all_gather_object(tps, tp)
-            tp = np.vstack([i[None] for i in tps]).sum(0)
-
-            fps = [None for _ in range(world_size)]
-            dist.all_gather_object(fps, fp)
-            fp = np.vstack([i[None] for i in fps]).sum(0)
-
-            fns = [None for _ in range(world_size)]
-            dist.all_gather_object(fns, fn)
-            fn = np.vstack([i[None] for i in fns]).sum(0)
-
-            losses_val = [None for _ in range(world_size)]
-            dist.all_gather_object(losses_val, outputs_collated['loss'])
-            loss_here = np.vstack(losses_val).mean()
-        else:
-            loss_here = np.mean(outputs_collated['loss'])
-
-        global_dc_per_class = [i for i in [2 * i / (2 * i + j + k) for i, j, k in
-                                           zip(tp, fp, fn)]]
-        mean_fg_dice = np.nanmean(global_dc_per_class)
-        self.logger.log('mean_fg_dice', mean_fg_dice, self.current_epoch)
-        self.logger.log('dice_per_class_or_region', global_dc_per_class, self.current_epoch)
-        self.logger.log('val_losses', loss_here, self.current_epoch)
-
-    def on_epoch_start(self):
-        self.logger.log('epoch_start_timestamps', time(), self.current_epoch)
-
-    def on_epoch_end(self):
-        self.logger.log('epoch_end_timestamps', time(), self.current_epoch)
-
-        # todo find a solution for this stupid shit
-        self.print_to_log_file('train_loss', np.round(self.logger.my_fantastic_logging['train_losses'][-1], decimals=4))
-        self.print_to_log_file('val_loss', np.round(self.logger.my_fantastic_logging['val_losses'][-1], decimals=4))
-        self.print_to_log_file('Pseudo dice', [np.round(i, decimals=4) for i in
-                                               self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]])
-        self.print_to_log_file(
-            f"Epoch time: {np.round(self.logger.my_fantastic_logging['epoch_end_timestamps'][-1] - self.logger.my_fantastic_logging['epoch_start_timestamps'][-1], decimals=2)} s")
-
-        # handling periodic checkpointing
-        current_epoch = self.current_epoch
-        if (current_epoch + 1) % self.save_every == 0 and current_epoch != (self.num_epochs - 1):
-            self.save_checkpoint(join(self.output_folder, 'checkpoint_latest.pth'))
-
-        # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
-        if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
-            self._best_ema = self.logger.my_fantastic_logging['ema_fg_dice'][-1]
-            self.print_to_log_file(f"Yayy! New best EMA pseudo Dice: {np.round(self._best_ema, decimals=4)}")
-            self.save_checkpoint(join(self.output_folder, 'checkpoint_best.pth'))
-
-        if self.local_rank == 0:
-            self.logger.plot_progress_png(self.output_folder)
-
-        self.current_epoch += 1
-
-    def save_checkpoint(self, filename: str) -> None:
-        if self.local_rank == 0:
-            if not self.disable_checkpointing:
-                if self.is_ddp:
-                    mod = self.network.module
-                else:
-                    mod = self.network
-                if isinstance(mod, OptimizedModule):
-                    mod = mod._orig_mod
-
-                checkpoint = {
-                    'network_weights': mod.state_dict(),
-                    'optimizer_state': self.optimizer.state_dict(),
-                    'grad_scaler_state': self.grad_scaler.state_dict() if self.grad_scaler is not None else None,
-                    'logging': self.logger.get_checkpoint(),
-                    '_best_ema': self._best_ema,
-                    'current_epoch': self.current_epoch + 1,
-                    'init_args': self.my_init_kwargs,
-                    'trainer_name': self.__class__.__name__,
-                    'inference_allowed_mirroring_axes': self.inference_allowed_mirroring_axes,
-                }
-                torch.save(checkpoint, filename)
-            else:
-                self.print_to_log_file('No checkpoint written, checkpointing is disabled')
-
-    def load_checkpoint(self, filename_or_checkpoint: Union[dict, str]) -> None:
-        if not self.was_initialized:
-            self.initialize()
-
-        if isinstance(filename_or_checkpoint, str):
-            checkpoint = torch.load(filename_or_checkpoint, map_location=self.device)
-        # if state dict comes from nn.DataParallel but we use non-parallel model here then the state dict keys do not
-        # match. Use heuristic to make it match
-        new_state_dict = {}
-        for k, value in checkpoint['network_weights'].items():
-            key = k
-            if key not in self.network.state_dict().keys() and key.startswith('module.'):
-                key = key[7:]
-            new_state_dict[key] = value
-
-        self.my_init_kwargs = checkpoint['init_args']
-        self.current_epoch = checkpoint['current_epoch']
-        self.logger.load_checkpoint(checkpoint['logging'])
-        self._best_ema = checkpoint['_best_ema']
-        self.inference_allowed_mirroring_axes = checkpoint[
-            'inference_allowed_mirroring_axes'] if 'inference_allowed_mirroring_axes' in checkpoint.keys() else self.inference_allowed_mirroring_axes
-
-        # messing with state dict naming schemes. Facepalm.
-        if self.is_ddp:
-            if isinstance(self.network.module, OptimizedModule):
-                self.network.module._orig_mod.load_state_dict(new_state_dict)
-            else:
-                self.network.module.load_state_dict(new_state_dict)
-        else:
-            if isinstance(self.network, OptimizedModule):
-                self.network._orig_mod.load_state_dict(new_state_dict)
-            else:
-                self.network.load_state_dict(new_state_dict)
-        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
-        if self.grad_scaler is not None:
-            if checkpoint['grad_scaler_state'] is not None:
-                self.grad_scaler.load_state_dict(checkpoint['grad_scaler_state'])
-
-    def perform_actual_validation(self, save_probabilities: bool = False):
-        self.set_deep_supervision_enabled(False)
-        self.network.eval()
-
-        predictor = nnUNetPredictor(tile_step_size=0.5, use_gaussian=True, use_mirroring=True,
-                                    perform_everything_on_gpu=True, device=self.device, verbose=False,
-                                    verbose_preprocessing=False, allow_tqdm=False)
-        predictor.manual_initialization(self.network, self.plans_manager, self.configuration_manager, None,
-                                        self.dataset_json, self.__class__.__name__,
-                                        self.inference_allowed_mirroring_axes)
-
-        with multiprocessing.get_context("spawn").Pool(default_num_processes) as segmentation_export_pool:
-            worker_list = [i for i in segmentation_export_pool._pool]
-            validation_output_folder = join(self.output_folder, 'validation')
-            maybe_mkdir_p(validation_output_folder)
-
-            # we cannot use self.get_tr_and_val_datasets() here because we might be DDP and then we have to distribute
-            # the validation keys across the workers.
-            _, _, val_keys = self.do_split()
-            if self.is_ddp:
-                val_keys = val_keys[self.local_rank:: dist.get_world_size()]
-
-            dataset_val = nnUNetDataset(self.preprocessed_dataset_folder, val_keys,
-                                        folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage,
-                                        num_images_properties_loading_threshold=0)
-
-            next_stages = self.configuration_manager.next_stage_names
-
-            if next_stages is not None:
-                _ = [maybe_mkdir_p(join(self.output_folder_base, 'predicted_next_stage', n)) for n in next_stages]
-
-            results = []
-
-            for k in dataset_val.keys():
-                proceed = not check_workers_alive_and_busy(segmentation_export_pool, worker_list, results,
-                                                 allowed_num_queued=2)
-                while not proceed:
-                    sleep(0.1)
-                    proceed = not check_workers_alive_and_busy(segmentation_export_pool, worker_list, results,
-                                                     allowed_num_queued=2)
-
-                self.print_to_log_file(f"predicting {k}")
-                data, seg, properties = dataset_val.load_case(k)
-
-                if self.is_cascaded:
-                    data = np.vstack((data, convert_labelmap_to_one_hot(seg[-1], self.label_manager.foreground_labels,
-                                                                        output_dtype=data.dtype)))
-                with warnings.catch_warnings():
-                    # ignore 'The given NumPy array is not writable' warning
-                    warnings.simplefilter("ignore")
-                    data = torch.from_numpy(data)
-
-                output_filename_truncated = join(validation_output_folder, k)
-
-                try:
-                    prediction = predictor.predict_sliding_window_return_logits(data)
-                except RuntimeError:
-                    predictor.perform_everything_on_gpu = False
-                    prediction = predictor.predict_sliding_window_return_logits(data)
-                    predictor.perform_everything_on_gpu = True
-
-                prediction = prediction.cpu()
-
-                # this needs to go into background processes
-                results.append(
-                    segmentation_export_pool.starmap_async(
-                        export_prediction_from_logits, (
-                            (prediction, properties, self.configuration_manager, self.plans_manager,
-                             self.dataset_json, output_filename_truncated, save_probabilities),
-                        )
-                    )
-                )
-                # for debug purposes
-                # export_prediction(prediction_for_export, properties, self.configuration, self.plans, self.dataset_json,
-                #              output_filename_truncated, save_probabilities)
-
-                # if needed, export the softmax prediction for the next stage
-                if next_stages is not None:
-                    for n in next_stages:
-                        next_stage_config_manager = self.plans_manager.get_configuration(n)
-                        expected_preprocessed_folder = join(nnUNet_preprocessed, self.plans_manager.dataset_name,
-                                                            next_stage_config_manager.data_identifier)
-
-                        try:
-                            # we do this so that we can use load_case and do not have to hard code how loading training cases is implemented
-                            tmp = nnUNetDataset(expected_preprocessed_folder, [k],
-                                                num_images_properties_loading_threshold=0)
-                            d, s, p = tmp.load_case(k)
-                        except FileNotFoundError:
-                            self.print_to_log_file(
-                                f"Predicting next stage {n} failed for case {k} because the preprocessed file is missing! "
-                                f"Run the preprocessing for this configuration first!")
-                            continue
-
-                        target_shape = d.shape[1:]
-                        output_folder = join(self.output_folder_base, 'predicted_next_stage', n)
-                        output_file = join(output_folder, k + '.npz')
-
-                        # resample_and_save(prediction, target_shape, output_file, self.plans_manager, self.configuration_manager, properties,
-                        #                   self.dataset_json)
-                        results.append(segmentation_export_pool.starmap_async(
-                            resample_and_save, (
-                                (prediction, target_shape, output_file, self.plans_manager,
-                                 self.configuration_manager,
-                                 properties,
-                                 self.dataset_json),
-                            )
-                        ))
-
-            _ = [r.get() for r in results]
-
-        if self.is_ddp:
-            dist.barrier()
-
-        if self.local_rank == 0:
-            metrics = compute_metrics_on_folder(join(self.preprocessed_dataset_folder_base, 'gt_segmentations'),
-                                                validation_output_folder,
-                                                join(validation_output_folder, 'summary.json'),
-                                                self.plans_manager.image_reader_writer_class(),
-                                                self.dataset_json["file_ending"],
-                                                self.label_manager.foreground_regions if self.label_manager.has_regions else
-                                                self.label_manager.foreground_labels,
-                                                self.label_manager.ignore_label, chill=True)
-            self.print_to_log_file("Validation complete", also_print_to_console=True)
-            self.print_to_log_file("Mean Validation Dice: ", (metrics['foreground_mean']["Dice"]), also_print_to_console=True)
-
-        self.set_deep_supervision_enabled(True)
-        compute_gaussian.cache_clear()
 
     def run_training(self):
         self.on_train_start()
