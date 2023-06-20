@@ -10,6 +10,7 @@ from batchgenerators.utilities.file_and_folder_operations import load_json, isfi
 from nnunetv2.configuration import default_num_processes
 from nnunetv2.utilities.label_handling.label_handling import LabelManager
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, ConfigurationManager
+from nnunetv2.postprocessing.remove_small_ccl import remove_small_ccl
 
 
 def convert_predicted_logits_to_segmentation_with_correct_shape(predicted_logits: Union[torch.Tensor, np.ndarray],
@@ -18,7 +19,8 @@ def convert_predicted_logits_to_segmentation_with_correct_shape(predicted_logits
                                                                 label_manager: LabelManager,
                                                                 properties_dict: dict,
                                                                 return_probabilities: bool = False,
-                                                                num_threads_torch: int = default_num_processes):
+                                                                num_threads_torch: int = default_num_processes,
+                                                                do_remove_small_ccl: bool = False):
     old_threads = torch.get_num_threads()
     torch.set_num_threads(num_threads_torch)
 
@@ -50,6 +52,11 @@ def convert_predicted_logits_to_segmentation_with_correct_shape(predicted_logits
 
     # revert transpose
     segmentation_reverted_cropping = segmentation_reverted_cropping.transpose(plans_manager.transpose_backward)
+
+    # 在这里进行后处理，去除小连通分量，注意这个操作不是对所有分割任务都适用
+    if do_remove_small_ccl:
+        segmentation_reverted_cropping = remove_small_ccl(segmentation_reverted_cropping)
+
     if return_probabilities:
         # revert cropping
         predicted_probabilities = label_manager.revert_cropping_on_probabilities(predicted_probabilities,
@@ -72,7 +79,8 @@ def export_prediction_from_logits(predicted_array_or_file: Union[np.ndarray, tor
                                   configuration_manager: ConfigurationManager,
                                   plans_manager: PlansManager,
                                   dataset_json_dict_or_file: Union[dict, str], output_file_truncated: str,
-                                  save_probabilities: bool = False):
+                                  save_probabilities: bool = False,
+                                  do_remove_small_ccl: bool = False):
     # if isinstance(predicted_array_or_file, str):
     #     tmp = deepcopy(predicted_array_or_file)
     #     if predicted_array_or_file.endswith('.npy'):
@@ -87,7 +95,7 @@ def export_prediction_from_logits(predicted_array_or_file: Union[np.ndarray, tor
     label_manager = plans_manager.get_label_manager(dataset_json_dict_or_file)
     ret = convert_predicted_logits_to_segmentation_with_correct_shape(
         predicted_array_or_file, plans_manager, configuration_manager, label_manager, properties_dict,
-        return_probabilities=save_probabilities
+        return_probabilities=save_probabilities, do_remove_small_ccl=do_remove_small_ccl
     )
     del predicted_array_or_file
 

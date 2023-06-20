@@ -104,7 +104,10 @@ class nnUNetTrainer(object):
         # need. So let's save the init args
         self.my_init_kwargs = {}
         for k in inspect.signature(self.__init__).parameters.keys():
-            self.my_init_kwargs[k] = locals()[k]
+            if k in locals():
+                self.my_init_kwargs[k] = locals()[k]
+            else:
+                print(f'key {k} not in locals()')
 
         ###  Saving all the init args into class variables for later access
         self.plans_manager = PlansManager(plans)
@@ -142,7 +145,7 @@ class nnUNetTrainer(object):
         self.oversample_foreground_percent = 0.33
         self.num_iterations_per_epoch = 250
         self.num_val_iterations_per_epoch = 50
-        self.num_epochs = 200
+        self.num_epochs = 300
         self.current_epoch = 0
 
         ### Dealing with labels/regions

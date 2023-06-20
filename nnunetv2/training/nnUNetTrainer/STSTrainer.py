@@ -154,6 +154,11 @@ class STSTrainer(nnUNetTrainer):
             raise RuntimeError("You have called self.initialize even though the trainer was already initialized. "
                                "That should not happen.")
 
+    def configure_optimizers(self):
+        optimizer = torch.optim.SGD(self.network.parameters() if self.pre_train else self.student.parameters(), self.initial_lr, weight_decay=self.weight_decay,
+                                    momentum=0.99, nesterov=True)
+        lr_scheduler = PolyLRScheduler(optimizer, self.initial_lr, self.num_epochs)
+        return optimizer, lr_scheduler
 
     def load_checkpoint_ssl(self, filename_or_checkpoint: str) -> None:
         """
@@ -196,17 +201,17 @@ class STSTrainer(nnUNetTrainer):
         # 固定住老师模型的参数
         if self.is_ddp:
             if isinstance(self.teacher.module, OptimizedModule):
-                for param in self.teacher.module._orig_mod:
+                for param in self.teacher.module._orig_mod.parameters():
                     param.detach_()
             else:
-                for param in self.teacher.module:
+                for param in self.teacher.module.parameters():
                     param.detach_()
         else:
             if isinstance(self.teacher, OptimizedModule):
-                for param in self.teacher._orig_mod:
+                for param in self.teacher._orig_mod.parameters():
                     param.detach_()
             else:
-                for param in self.teacher:
+                for param in self.teacher.parameters():
                     param.detach_()
 
         # 下面的参数看情况加载吧，我认为这是开启了一个全新的训练，所以不需要加载
@@ -356,6 +361,24 @@ class STSTrainer(nnUNetTrainer):
                                         sampling_probabilities=None, pad_sides=None)
         return dl_tr_labelled, dl_tr_unlabelled, dl_val
 
+    def set_deep_supervision_enabled(self, enabled: bool):
+        """
+        This function is specific for the default architecture in nnU-Net. If you change the architecture, there are
+        chances you need to change this as well!
+        """
+        if self.pre_train:
+            if self.is_ddp:
+                self.network.module.decoder.deep_supervision = enabled
+            else:
+                self.network.decoder.deep_supervision = enabled
+        else:
+            if self.is_ddp:
+                self.student.module.decoder.deep_supervision = enabled
+                self.teacher.module.decoder.deep_supervision = enabled
+            else:
+                self.student.decoder.deep_supervision = enabled
+                self.teacher.decoder.deep_supervision = enabled
+
     def on_train_start(self):
         if not self.was_initialized:
             self.initialize()
@@ -497,8 +520,8 @@ class STSTrainer(nnUNetTrainer):
                     pre_c = self.teacher(unlabelled_data_c)
                     pre_d = self.teacher(unlabelled_data_d)
                     # 做softmax得到伪标签
-                    _, pre_c = torch.max(F.softmax(pre_c, dim=1), dim=1)
-                    _, pre_d = torch.max(F.softmax(pre_d, dim=1), dim=1)
+                    pre_c = [torch.max(F.softmax(pred, dim=1), dim=1)[1] for pred in pre_c]
+                    pre_d = [torch.max(F.softmax(pred, dim=1), dim=1)[1] for pred in pre_d]
                     # TODO: 这里我没有做连通分量检测，不知道有没有问题
 
                 # 老师模型的任务完成了，给无标签数据打上了伪标签
@@ -509,7 +532,7 @@ class STSTrainer(nnUNetTrainer):
                 crop_c_to_a_target = [target_c * loss_mask + target_a * (1 - loss_mask)
                                       for target_c, target_a, loss_mask in zip(pre_c, labelled_target_a, loss_masks)]
                 # 有标签数据裁剪到无标签数据
-                crop_b_to_d = labelled_data_b * img_masks[0] + unalbelled_data_d * (1 - img_masks[0])
+                crop_b_to_d = labelled_data_b * img_masks[0] + unlabelled_data_d * (1 - img_masks[0])
                 crop_b_to_d_target = [target_b * loss_mask + target_d * (1 - loss_mask)
                                       for target_b, target_d, loss_mask in zip(labelled_target_b, pre_d, loss_masks)]
                 # 得到输出结果
@@ -525,12 +548,18 @@ class STSTrainer(nnUNetTrainer):
         if self.grad_scaler is not None:
             self.grad_scaler.scale(l).backward()
             self.grad_scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+            if self.pre_train:
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+            else:
+                torch.nn.utils.clip_grad_norm_(self.student.parameters(), 12)
             self.grad_scaler.step(self.optimizer)
             self.grad_scaler.update()
         else:
             l.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+            if self.pre_train:
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+            else:
+                torch.nn.utils.clip_grad_norm_(self.student.parameters(), 12)
             self.optimizer.step()
 
         # 半监督训练中，每个iter，老师模型也更新
@@ -743,6 +772,142 @@ class STSTrainer(nnUNetTrainer):
             fn_hard = fn_hard[1:]
 
         return {'loss': l.detach().cpu().numpy(), 'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard}
+
+
+    def perform_actual_validation(self, save_probabilities: bool = False):
+        self.set_deep_supervision_enabled(False)
+        if self.pre_train:
+            self.network.eval()
+        else:
+            self.student.eval()
+
+        predictor = nnUNetPredictor(tile_step_size=0.5, use_gaussian=True, use_mirroring=True,
+                                    perform_everything_on_gpu=True, device=self.device, verbose=False,
+                                    verbose_preprocessing=False, allow_tqdm=False)
+
+        predictor.manual_initialization(self.network if self.pre_train else self.student, self.plans_manager,
+                                        self.configuration_manager, None,
+                                        self.dataset_json, self.__class__.__name__,
+                                        self.inference_allowed_mirroring_axes)
+
+        with multiprocessing.get_context("spawn").Pool(default_num_processes) as segmentation_export_pool:
+            worker_list = [i for i in segmentation_export_pool._pool]
+            validation_output_folder = join(self.output_folder, 'validation')
+            maybe_mkdir_p(validation_output_folder)
+
+            # we cannot use self.get_tr_and_val_datasets() here because we might be DDP and then we have to distribute
+            # the validation keys across the workers.
+            _, _, val_keys = self.do_split()
+            if self.is_ddp:
+                val_keys = val_keys[self.local_rank:: dist.get_world_size()]
+
+            dataset_val = nnUNetDataset(self.preprocessed_dataset_folder, val_keys,
+                                        folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage,
+                                        num_images_properties_loading_threshold=0)
+
+            next_stages = self.configuration_manager.next_stage_names
+
+            if next_stages is not None:
+                _ = [maybe_mkdir_p(join(self.output_folder_base, 'predicted_next_stage', n)) for n in next_stages]
+
+            results = []
+
+            for k in dataset_val.keys():
+                proceed = not check_workers_alive_and_busy(segmentation_export_pool, worker_list, results,
+                                                 allowed_num_queued=2)
+                while not proceed:
+                    sleep(0.1)
+                    proceed = not check_workers_alive_and_busy(segmentation_export_pool, worker_list, results,
+                                                     allowed_num_queued=2)
+
+                self.print_to_log_file(f"predicting {k}")
+                data, seg, properties = dataset_val.load_case(k)
+
+                if self.is_cascaded:
+                    data = np.vstack((data, convert_labelmap_to_one_hot(seg[-1], self.label_manager.foreground_labels,
+                                                                        output_dtype=data.dtype)))
+                with warnings.catch_warnings():
+                    # ignore 'The given NumPy array is not writable' warning
+                    warnings.simplefilter("ignore")
+                    data = torch.from_numpy(data)
+
+                output_filename_truncated = join(validation_output_folder, k)
+
+                try:
+                    prediction = predictor.predict_sliding_window_return_logits(data)
+                except RuntimeError:
+                    predictor.perform_everything_on_gpu = False
+                    prediction = predictor.predict_sliding_window_return_logits(data)
+                    predictor.perform_everything_on_gpu = True
+
+                prediction = prediction.cpu()
+
+                # this needs to go into background processes
+                results.append(
+                    segmentation_export_pool.starmap_async(
+                        export_prediction_from_logits, (
+                            (prediction, properties, self.configuration_manager, self.plans_manager,
+                             self.dataset_json, output_filename_truncated, save_probabilities),
+                        )
+                    )
+                )
+                # for debug purposes
+                # export_prediction(prediction_for_export, properties, self.configuration, self.plans, self.dataset_json,
+                #              output_filename_truncated, save_probabilities)
+
+                # if needed, export the softmax prediction for the next stage
+                if next_stages is not None:
+                    for n in next_stages:
+                        next_stage_config_manager = self.plans_manager.get_configuration(n)
+                        expected_preprocessed_folder = join(nnUNet_preprocessed, self.plans_manager.dataset_name,
+                                                            next_stage_config_manager.data_identifier)
+
+                        try:
+                            # we do this so that we can use load_case and do not have to hard code how loading training cases is implemented
+                            tmp = nnUNetDataset(expected_preprocessed_folder, [k],
+                                                num_images_properties_loading_threshold=0)
+                            d, s, p = tmp.load_case(k)
+                        except FileNotFoundError:
+                            self.print_to_log_file(
+                                f"Predicting next stage {n} failed for case {k} because the preprocessed file is missing! "
+                                f"Run the preprocessing for this configuration first!")
+                            continue
+
+                        target_shape = d.shape[1:]
+                        output_folder = join(self.output_folder_base, 'predicted_next_stage', n)
+                        output_file = join(output_folder, k + '.npz')
+
+                        # resample_and_save(prediction, target_shape, output_file, self.plans_manager, self.configuration_manager, properties,
+                        #                   self.dataset_json)
+                        results.append(segmentation_export_pool.starmap_async(
+                            resample_and_save, (
+                                (prediction, target_shape, output_file, self.plans_manager,
+                                 self.configuration_manager,
+                                 properties,
+                                 self.dataset_json),
+                            )
+                        ))
+
+            _ = [r.get() for r in results]
+
+        if self.is_ddp:
+            dist.barrier()
+
+        if self.local_rank == 0:
+            metrics = compute_metrics_on_folder(join(self.preprocessed_dataset_folder_base, 'gt_segmentations'),
+                                                validation_output_folder,
+                                                join(validation_output_folder, 'summary.json'),
+                                                self.plans_manager.image_reader_writer_class(),
+                                                self.dataset_json["file_ending"],
+                                                self.label_manager.foreground_regions if self.label_manager.has_regions else
+                                                self.label_manager.foreground_labels,
+                                                self.label_manager.ignore_label, chill=True)
+            self.print_to_log_file("Validation complete", also_print_to_console=True)
+            self.print_to_log_file("Mean Validation Dice: ", (metrics['foreground_mean']["Dice"]), also_print_to_console=True)
+
+        self.set_deep_supervision_enabled(True)
+        compute_gaussian.cache_clear()
+
 
     def run_training(self):
         self.on_train_start()

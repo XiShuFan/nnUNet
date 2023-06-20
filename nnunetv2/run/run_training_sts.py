@@ -212,7 +212,8 @@ def run_training(dataset_name_or_id: Union[str, int],
         if not only_run_validation:
             nnunet_trainer.run_training()
 
-        nnunet_trainer.perform_actual_validation(export_validation_probabilities)
+        # 不执行完整验证，代码还有些地方需要改
+        # nnunet_trainer.perform_actual_validation(export_validation_probabilities)
 
 
 def run_training_entry():
@@ -222,7 +223,7 @@ def run_training_entry():
     print('You can specify configuration and fold')
 
     # 运行STS-3D半监督任务
-    parser.add_argument('-dataset_name_or_id', type=str, default='1001',
+    parser.add_argument('-dataset_name_or_id', type=str, default='1002',
                         help="Dataset name or ID to train with")
 
     # 不指定配置的话，默认会使用所有配置训练一遍，然后模型来判断最优配置
@@ -297,13 +298,18 @@ def run_training_entry():
     # 保存预测热力图，方便后面ensemble learning
     args.npz = True
 
-    # 首先进行teacher模型的预训练
+    # 首先进行teacher模型的预训练，需要手动设置80epoch
+    # run_training(args.dataset_name_or_id, args.configuration, args.fold, args.tr, args.p, args.pretrained_weights,
+    #              args.num_gpus, args.use_compressed, args.npz, args.c, args.val, args.disable_checkpointing,
+    #              device=device, pre_train=True)
+
+    # 然后进行半监督分割，手动设置300个epoch
     run_training(args.dataset_name_or_id, args.configuration, args.fold, args.tr, args.p, args.pretrained_weights,
                  args.num_gpus, args.use_compressed, args.npz, args.c, args.val, args.disable_checkpointing,
-                 device=device, pre_train=True)
+                 device=device, pre_train=False)
 
 
 if __name__ == '__main__':
     # 环境变量设置在最上方
-    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     run_training_entry()

@@ -111,11 +111,11 @@ def main():
     labelled_path = "D:\\xsf\\Dataset\\STS-3D\\labelled"
     unlabelled_path = "D:\\xsf\\Dataset\\STS-3D\\unlabelled"
 
-    imagesTr_path = "D:\\xsf\\Dataset\\nnUNet_raw\\Dataset1001_STS3D\\imagesTr"
-    imagesTs_path = "D:\\xsf\\Dataset\\nnUNet_raw\\Dataset1001_STS3D\\imagesTs"
-    labelsTr_path = "D:\\xsf\\Dataset\\nnUNet_raw\\Dataset1001_STS3D\\labelsTr"
-    labelsTs_path = "D:\\xsf\\Dataset\\nnUNet_raw\\Dataset1001_STS3D\\labelsTs"
-    json_path = "D:\\xsf\\Dataset\\nnUNet_raw\\Dataset1001_STS3D\\dataset.json"
+    imagesTr_path = "D:\\xsf\\Dataset\\nnUNet_raw\\Dataset1002_STS3D\\imagesTr"
+    imagesTs_path = "D:\\xsf\\Dataset\\nnUNet_raw\\Dataset1002_STS3D\\imagesTs"
+    labelsTr_path = "D:\\xsf\\Dataset\\nnUNet_raw\\Dataset1002_STS3D\\labelsTr"
+    labelsTs_path = "D:\\xsf\\Dataset\\nnUNet_raw\\Dataset1002_STS3D\\labelsTs"
+    json_path = "D:\\xsf\\Dataset\\nnUNet_raw\\Dataset1002_STS3D\\dataset.json"
 
     if not os.path.exists(imagesTr_path):
         os.makedirs(imagesTr_path)

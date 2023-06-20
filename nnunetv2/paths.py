@@ -18,6 +18,11 @@ import os
 PLEASE READ paths.md FOR INFORMATION TO HOW TO SET THIS UP
 """
 
+# 直接写死
+os.environ['nnUNet_raw'] = 'D:\\xsf\\Dataset\\nnUNet_raw'
+os.environ['nnUNet_preprocessed'] = 'D:\\xsf\\Dataset\\nnUNet_preprocessed'
+os.environ['nnUNet_results'] = 'D:\\xsf\\Dataset\\nnUNet_results'
+
 nnUNet_raw = os.environ.get('nnUNet_raw')
 nnUNet_preprocessed = os.environ.get('nnUNet_preprocessed')
 nnUNet_results = os.environ.get('nnUNet_results')
