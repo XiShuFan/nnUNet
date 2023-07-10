@@ -5,7 +5,7 @@ from nnunetv2.experiment_planning.plan_and_preprocess_api import extract_fingerp
 def extract_fingerprint_entry():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('-d', nargs='+', type=int, default=[1002],
+    parser.add_argument('-d', nargs='+', type=int, default=[1003],
                         help="[REQUIRED] List of dataset IDs. Example: 2 4 5. This will run fingerprint extraction, experiment "
                              "planning and preprocessing for these datasets. Can of course also be just one dataset")
     parser.add_argument('-fpe', type=str, required=False, default='DatasetFingerprintExtractor',
@@ -257,10 +257,10 @@ if __name__ == '__main__':
     # 我认为这里存在的问题：
     # （1）没有保存原图像大小
     # （2）没有考虑金属伪影
-    # extract_fingerprint_entry()
+    extract_fingerprint_entry()
 
     # 设计实验，决定体素分辨率重采样，网络架构，裁剪的patch大小等
     # plan_experiment_entry()
 
     # 根据三个不同配置（2d, 3d_fullres, 3d_lowres），重采样数据
-    preprocess_entry()
+    # preprocess_entry()

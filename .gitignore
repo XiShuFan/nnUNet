@@ -114,3 +114,4 @@ ENV/
 *.model
 nnunetv2.egg-info
 
+*.pth

@@ -3,6 +3,7 @@ import PIL.ImageDraw as ImageDraw
 import PIL.ImageFont as ImageFont
 from PIL import ImageColor
 import numpy as np
+from typing import List
 
 STANDARD_COLORS = [
     'AliceBlue', 'Chartreuse', 'Aqua', 'Aquamarine', 'Azure', 'Beige', 'Bisque',
@@ -38,7 +39,8 @@ def draw_text(draw,
               category_index: dict,
               color: str,
               font: str = 'arial.ttf',
-              font_size: int = 24):
+              font_size: int = 24,
+              comment: str = None):
     """
     将目标边界框和类别信息绘制到图片上
     """
@@ -53,8 +55,10 @@ def draw_text(draw,
     # instead of above.
     display_str = f"{category_index[str(cls)]}: {int(100 * score)}%"
     display_str_heights = [font.getsize(ds)[1] for ds in display_str]
+    if comment is not None:
+        display_str_heights += [font.getsize(ds)[1] for ds in comment]
     # Each display_str has a top and bottom margin of 0.05x.
-    display_str_height = (1 + 2 * 0.05) * max(display_str_heights)
+    display_str_height = (1 + 2 * 0.05) * max(display_str_heights) * (2 if comment is not None else 1)
 
     if top > display_str_height:
         text_top = top - display_str_height
@@ -73,6 +77,19 @@ def draw_text(draw,
                   fill='black',
                   font=font)
         left += text_width
+
+    if comment is not None:
+        left, top, right, bottom = box
+        for ds in comment:
+            text_width, text_height = font.getsize(ds)
+            margin = np.ceil(0.05 * text_width)
+            draw.rectangle([(left, text_top + display_str_height // 2),
+                            (left + text_width + 2 * margin, text_bottom)], fill=color)
+            draw.text((left + margin, text_top + display_str_height // 2),
+                      ds,
+                      fill='black',
+                      font=font)
+            left += text_width
 
 
 def draw_masks(image, masks, colors, thresh: float = 0.7, alpha: float = 0.5):
@@ -101,7 +118,8 @@ def draw_objs(image: Image,
               font: str = 'arial.ttf',
               font_size: int = 24,
               draw_boxes_on_image: bool = True,
-              draw_masks_on_image: bool = True):
+              draw_masks_on_image: bool = True,
+              comments: List[str] = None):
     """
     将目标边界框信息，类别信息，mask信息绘制在图片上
     Args:
@@ -118,18 +136,27 @@ def draw_objs(image: Image,
         font_size: 字体大小
         draw_boxes_on_image:
         draw_masks_on_image:
-
+        comments: 与bbox一一对应的文本信息
     Returns:
 
     """
 
-    # 过滤掉低概率的目标
+    # 过滤掉低概率的目标，预测时才需要
+    if scores is None:
+        scores = [1.0] * len(boxes)
+        scores = np.array(scores)
+
+    # 判断是否与bbox对应的文本
+    if comments is None:
+        comments = [None] * len(boxes)
+
     idxs = np.greater(scores, box_thresh)
     boxes = boxes[idxs]
     classes = classes[idxs]
     scores = scores[idxs]
     if masks is not None:
         masks = masks[idxs]
+
     if len(boxes) == 0:
         return image
 
@@ -138,13 +165,13 @@ def draw_objs(image: Image,
     if draw_boxes_on_image:
         # Draw all boxes onto image.
         draw = ImageDraw.Draw(image)
-        for box, cls, score, color in zip(boxes, classes, scores, colors):
+        for box, cls, score, color, comment in zip(boxes, classes, scores, colors, comments):
             left, top, right, bottom = box
             # 绘制目标边界框
             draw.line([(left, top), (left, bottom), (right, bottom),
                        (right, top), (left, top)], width=line_thickness, fill=color)
             # 绘制类别和概率信息
-            draw_text(draw, box.tolist(), int(cls), float(score), category_index, color, font, font_size)
+            draw_text(draw, box.tolist(), int(cls), float(score), category_index, color, font, font_size, comment)
 
     if draw_masks_on_image and (masks is not None):
         # Draw all mask onto image.

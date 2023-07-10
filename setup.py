@@ -19,7 +19,7 @@ setup(name='nnunetv2',
           "medpy",
           "scipy",
           "batchgenerators>=0.25",
-          "numpy",
+          "numpy==1.23.5",
           "scikit-learn",
           "scikit-image>=0.19.3",
           "SimpleITK>=2.2.1",
@@ -31,7 +31,11 @@ setup(name='nnunetv2',
           "matplotlib",
           "seaborn",
           "imagecodecs",
-          "yacs"
+          "yacs",
+          "timm",
+          "monai==0.7.0",
+          "einops==0.3.0",
+          "tensorboard"
       ],
       entry_points={
           'console_scripts': [
